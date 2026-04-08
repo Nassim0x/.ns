@@ -1,0 +1,8 @@
+bin/
+obj/
+*.user
+*.suo
+*.cache
+compat-v1/
+validation-v*/
+publish-check/
