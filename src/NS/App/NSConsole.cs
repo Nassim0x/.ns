@@ -119,7 +119,7 @@ internal sealed class NSConsole
 
     private void EncryptInteractive(string? initialInputPath = null)
     {
-        DrawActionScreen("Encrypt", "Protect a file or folder into a .ns container.");
+        DrawActionScreen("Encrypt", "Protect a file, folder, or drive into a .ns container.");
 
         var inputPath = string.IsNullOrWhiteSpace(initialInputPath)
             ? ReadPath("Path: ")
@@ -141,7 +141,7 @@ internal sealed class NSConsole
 
     private void DecryptInteractive(string? initialInputPath = null)
     {
-        DrawActionScreen("Decrypt", "Restore a file or folder from an existing .ns container.");
+        DrawActionScreen("Decrypt", "Restore a file, folder, or drive backup from a .ns container.");
 
         var inputPath = string.IsNullOrWhiteSpace(initialInputPath)
             ? ReadPath("Path: ")
@@ -267,7 +267,7 @@ internal sealed class NSConsole
     private static void PrintUsage()
     {
         Console.WriteLine(TerminalTheme.Strong("NS"));
-        Console.WriteLine(TerminalTheme.Muted("Simple Windows file and folder encryption."));
+        Console.WriteLine(TerminalTheme.Muted("Simple Windows file, folder, and drive encryption."));
         Console.WriteLine();
         Console.WriteLine(TerminalTheme.Accent("Usage"));
         Console.WriteLine("  NS encrypt <path> [output.ns] [--force]");
@@ -277,10 +277,11 @@ internal sealed class NSConsole
         Console.WriteLine(TerminalTheme.AccentSoft("Examples"));
         Console.WriteLine(@"  NS encrypt ""C:\Docs\contract.pdf""");
         Console.WriteLine(@"  NS encrypt ""C:\Docs\Projects""");
+        Console.WriteLine(@"  NS encrypt ""E:\\"" ""D:\Backups\drive-e.ns""");
         Console.WriteLine(@"  NS decrypt ""C:\Docs\contract.pdf.ns""");
         Console.WriteLine(@"  NS decrypt ""C:\Docs\contract.pdf.ns"" ""C:\Docs\contract.pdf"" --force");
         Console.WriteLine();
-        Console.WriteLine("You can also drop a file directly onto the home screen.");
+        Console.WriteLine("You can also drop a path directly onto the home screen.");
     }
 
     private static string ReadPath(string prompt)

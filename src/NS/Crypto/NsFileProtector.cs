@@ -445,12 +445,7 @@ internal sealed class NsFileProtector
         }
 
         EnsureSafeDirectorySource(sourcePath);
-        var originalName = GetDirectoryDisplayName(sourcePath);
-
-        if (string.IsNullOrWhiteSpace(originalName))
-        {
-            throw new InvalidOperationException("Root directories cannot be encrypted directly.");
-        }
+        var originalName = GetContainerDisplayNameForDirectory(sourcePath);
 
         var archivePath = CreateTemporaryArchivePath();
         CreateDirectoryArchive(sourcePath, archivePath);
@@ -1016,6 +1011,7 @@ internal sealed class NsFileProtector
 
     private static void CreateDirectoryArchive(string sourceDirectory, string archivePath)
     {
+        var fullArchivePath = Path.GetFullPath(archivePath);
         using var stream = File.Create(archivePath);
         using var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: false, entryNameEncoding: Encoding.UTF8);
         var stack = new Stack<string>();
@@ -1041,6 +1037,11 @@ internal sealed class NsFileProtector
 
             foreach (var file in Directory.GetFiles(currentDirectory))
             {
+                if (string.Equals(Path.GetFullPath(file), fullArchivePath, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 EnsureSafeFileSource(file);
                 var relativeFile = NormalizeArchiveEntryName(Path.GetRelativePath(sourceDirectory, file));
                 var entry = archive.CreateEntry(relativeFile, CompressionLevel.NoCompression);
@@ -1207,6 +1208,72 @@ internal sealed class NsFileProtector
     {
         var trimmed = sourceDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
         return Path.GetFileName(trimmed);
+    }
+
+    private static string GetContainerDisplayNameForDirectory(string sourceDirectory)
+    {
+        var directoryName = GetDirectoryDisplayName(sourceDirectory);
+
+        if (!string.IsNullOrWhiteSpace(directoryName))
+        {
+            return directoryName;
+        }
+
+        if (IsDriveRootPath(sourceDirectory))
+        {
+            return GetDriveDisplayName(sourceDirectory);
+        }
+
+        throw new InvalidOperationException("Root directories cannot be encrypted directly.");
+    }
+
+    private static bool IsDriveRootPath(string path)
+    {
+        var fullPath = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(fullPath);
+
+        return !string.IsNullOrWhiteSpace(root) &&
+               string.Equals(
+                   fullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                   root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string GetDriveDisplayName(string sourceDirectory)
+    {
+        var root = Path.GetPathRoot(Path.GetFullPath(sourceDirectory)) ?? sourceDirectory;
+        var driveToken = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar).TrimEnd(':').ToUpperInvariant();
+        var volumeLabel = string.Empty;
+
+        try
+        {
+            var drive = new DriveInfo(root);
+
+            if (drive.IsReady)
+            {
+                volumeLabel = SanitizeNameForPathComponent(drive.VolumeLabel);
+            }
+        }
+        catch
+        {
+            // Best-effort only. A drive may not expose a label.
+        }
+
+        return !string.IsNullOrWhiteSpace(volumeLabel)
+            ? $"{volumeLabel} ({driveToken})"
+            : $"{driveToken} Drive";
+    }
+
+    private static string SanitizeNameForPathComponent(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var filtered = new string(value.Where(character => !invalid.Contains(character)).ToArray()).Trim();
+        return string.Join(' ', filtered.Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     private static void SafeDelete(string path)

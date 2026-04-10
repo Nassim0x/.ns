@@ -1,12 +1,12 @@
 # NS
 
-Secure local file and folder encryption for Windows, designed to stay simple.
+Secure local file, folder, and drive-content encryption for Windows, designed to stay simple.
 
-NS turns a file or a full folder into a single `.ns` container, then restores it later with the correct password. It is built for people who want strong modern encryption in a normal Windows terminal without dealing with a heavy vault app or a complicated workflow.
+NS turns a file, a full folder, or the contents of a drive into a single `.ns` container, then restores it later with the correct password. It is built for people who want strong modern encryption in a normal Windows terminal without dealing with a heavy vault app or a complicated workflow.
 
 ## Overview
 
-- encrypts files and folders into a single `.ns` container
+- encrypts files, folders, and drive contents into a single `.ns` container
 - restores the original file or directory structure on decrypt
 - uses `AES-256-GCM` authenticated encryption
 - uses `Argon2id` for new `.ns` containers
@@ -23,6 +23,7 @@ It is a good fit for:
 - local backups
 - sensitive documents
 - photo, video, and media folders
+- removable drives and secondary data drives
 - project exports you want to store or move securely
 
 It is not meant to replace:
@@ -44,6 +45,7 @@ Examples:
 - executables and installers: `.exe`, `.msi`
 - media: `.mp4`, `.mp3`, `.wav`
 - full folders with nested files and empty directories
+- drive roots such as `E:\`
 
 If Windows can read the file or folder from disk, NS can package and encrypt it.
 
@@ -62,6 +64,7 @@ Direct command examples:
 ```powershell
 .\dist\NS.exe encrypt "C:\Docs\contract.pdf"
 .\dist\NS.exe encrypt "C:\Photos\Trip-2026"
+.\dist\NS.exe encrypt "E:\" "D:\Backups\drive-e.ns"
 .\dist\NS.exe encrypt "C:\Docs\contract.pdf" "C:\Vault\contract"
 .\dist\NS.exe decrypt "C:\Docs\contract.pdf.ns"
 .\dist\NS.exe decrypt "C:\Photos\Trip-2026.ns" "C:\Restored\Trip-2026" --force
@@ -79,7 +82,7 @@ NS help
 
 Behavior:
 
-- `encrypt` accepts a file or a folder
+- `encrypt` accepts a file, a folder, or a drive root
 - `decrypt` restores either a file or a folder, depending on what was originally stored
 - `--force` allows overwriting an existing output path
 - running `NS.exe` without arguments starts the interactive mode
@@ -118,7 +121,7 @@ NS uses a layered container format for new `.ns` files.
 | Key separation | distinct derived keys for metadata and content |
 | Metadata protection | encrypted, authenticated, and padded |
 | Chunk protection | authenticated block encryption with unique nonces |
-| Folder handling | packed into an internal archive before encryption |
+| Folder and drive handling | packed into an internal archive before encryption |
 
 ### What This Means In Practice
 
@@ -136,6 +139,7 @@ For newly created `.ns` files:
 - offline inspection without the password
 - silent modification of encrypted data
 - normal local storage scenarios on disk, USB, and cloud-synced folders
+- encrypted backups of removable or secondary drives
 
 ### What NS Does Not Protect Against
 
@@ -166,6 +170,22 @@ On restore, NS recreates:
 
 For safety, folders containing reparse points, junctions, or similar linked paths are rejected instead of being followed implicitly.
 
+## Drive Support
+
+NS can also encrypt the contents of a drive by pointing `encrypt` at the drive root, for example `E:\`.
+
+This is useful for:
+
+- external hard drives
+- USB storage
+- secondary internal data drives
+
+Important:
+
+- NS packages the contents of the drive into a `.ns` container
+- NS does not replace true full-disk encryption products such as BitLocker
+- decrypting a drive container restores it as a normal folder unless you explicitly choose another output path
+
 ## Operational Notes
 
 - output is written to a temporary path first, then moved into place only on success
@@ -185,12 +205,13 @@ NS is intentionally focused.
 
 ## Validation
 
-Latest local validation completed on `2026-04-08`.
+Latest local validation completed on `2026-04-10`.
 
 Verified locally:
 
 - file encrypt -> decrypt round-trip with matching hash
 - folder encrypt -> decrypt round-trip with matching tree and file hashes
+- drive-root encrypt -> decrypt round-trip with matching restored tree
 - empty folder restoration
 - decryption failure with a wrong password
 - decryption failure after container tampering
