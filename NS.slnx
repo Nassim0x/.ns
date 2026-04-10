@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/NS/NS.csproj" />
+    <Project Path="src/NS.Setup/NS.Setup.csproj" />
   </Folder>
 </Solution>

@@ -7,7 +7,8 @@ namespace NS.Crypto;
 internal enum NsPayloadKind : byte
 {
     File = 1,
-    Directory = 2
+    Directory = 2,
+    CompressedFile = 3
 }
 
 internal sealed class NsMetadata
@@ -129,6 +130,7 @@ internal sealed class NsMetadata
         {
             (byte)NsPayloadKind.File => NsPayloadKind.File,
             (byte)NsPayloadKind.Directory => NsPayloadKind.Directory,
+            (byte)NsPayloadKind.CompressedFile => NsPayloadKind.CompressedFile,
             _ => throw new InvalidDataException("Unsupported payload type.")
         };
 

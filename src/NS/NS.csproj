@@ -11,6 +11,8 @@
     <Description>.ns.</Description>
     <AssemblyName>NS</AssemblyName>
     <RootNamespace>NS</RootNamespace>
+    <ApplicationIcon>Resources\NS.ico</ApplicationIcon>
+    <RuntimeIdentifiers>win-x64</RuntimeIdentifiers>
   </PropertyGroup>
 
   <ItemGroup>

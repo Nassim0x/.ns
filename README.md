@@ -8,9 +8,11 @@ NS turns a file, a full folder, or the contents of a drive into a single `.ns` c
 
 - encrypts files, folders, and drive contents into a single `.ns` container
 - restores the original file or directory structure on decrypt
+- supports optional compression before encryption with `--compress`
 - uses `AES-256-GCM` authenticated encryption
 - uses `Argon2id` for new `.ns` containers
 - keeps backward decrypt compatibility with older `.ns` containers
+- shows a live progress bar during preparation, encryption, decryption, and restore
 - ships as a portable single-file Windows executable: `dist/NS.exe`
 
 ## What NS Is For
@@ -63,7 +65,9 @@ Direct command examples:
 
 ```powershell
 .\dist\NS.exe encrypt "C:\Docs\contract.pdf"
+.\dist\NS.exe encrypt "C:\Docs\contract.pdf" "C:\Vault\contract.ns" --compress
 .\dist\NS.exe encrypt "C:\Photos\Trip-2026"
+.\dist\NS.exe encrypt "C:\Photos\Trip-2026" "D:\Backups\trip.ns" --compress
 .\dist\NS.exe encrypt "E:\" "D:\Backups\drive-e.ns"
 .\dist\NS.exe encrypt "C:\Docs\contract.pdf" "C:\Vault\contract"
 .\dist\NS.exe decrypt "C:\Docs\contract.pdf.ns"
@@ -75,7 +79,7 @@ If the output path passed to `encrypt` does not end with `.ns`, NS appends it au
 ## CLI
 
 ```text
-NS encrypt <path> [output.ns] [--force]
+NS encrypt <path> [output.ns] [--compress] [--force]
 NS decrypt <file.ns> [output] [--force]
 NS help
 ```
@@ -84,6 +88,7 @@ Behavior:
 
 - `encrypt` accepts a file, a folder, or a drive root
 - `decrypt` restores either a file or a folder, depending on what was originally stored
+- `--compress` applies ZIP compression before encryption
 - `--force` allows overwriting an existing output path
 - running `NS.exe` without arguments starts the interactive mode
 
@@ -94,14 +99,49 @@ Behavior:
 The easiest way to use NS is the published executable:
 
 - `dist/NS.exe`
+- `dist/NS-Installer.exe`
 
 No `dotnet run` step is required.
+
+### Mini Installer
+
+If you want a more app-like Windows setup flow, launch:
+
+```powershell
+.\dist\NS-Installer.exe
+```
+
+The mini installer:
+
+- installs `NS.exe` into `%LocalAppData%\Programs\NS`
+- creates Start Menu shortcuts
+- can create a desktop shortcut
+- can launch NS immediately after install
+- registers an uninstall entry for the current user
+- triggers the automatic `.ns` shell integration setup
+
+### Windows Shell Integration
+
+Starting `NS.exe` normally on Windows now installs the shell integration automatically for the current user.
+
+That means the first regular launch can automatically enable:
+
+- double-click support for `.ns`
+- the NS file icon
+- Explorer context menu entries for files, folders, drives, and `.ns` containers
+
+That installs a per-user shell integration under `HKCU\Software\Classes` and copies the active `NS.exe` to:
+
+```text
+%LocalAppData%\Programs\NS\NS.exe
+```
 
 ### Build From Source
 
 ```powershell
 dotnet build NS.slnx -c Release
 dotnet publish .\src\NS\NS.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist
+dotnet publish .\src\NS.Setup\NS.Setup.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o dist
 ```
 
 ## Security Design
@@ -170,6 +210,22 @@ On restore, NS recreates:
 
 For safety, folders containing reparse points, junctions, or similar linked paths are rejected instead of being followed implicitly.
 
+## Compression
+
+Compression is optional and is enabled with `--compress`.
+
+- for a regular file, NS creates a temporary single-file archive, then encrypts it
+- for a folder or drive content, NS keeps the same single-container workflow but uses compressed archive entries instead of store-only entries
+- if you skip `--compress`, NS still encrypts everything normally
+
+This is mainly useful when:
+
+- the source contains text, documents, or other compressible content
+- you want a smaller `.ns` container
+- you are packaging a folder and want to reduce archive size before encryption
+
+It is less useful for already-compressed content such as many videos, archives, installers, and some image formats.
+
 ## Drive Support
 
 NS can also encrypt the contents of a drive by pointing `encrypt` at the drive root, for example `E:\`.
@@ -193,6 +249,7 @@ Important:
 - password entry is masked in interactive mode
 - file and folder names are restored from encrypted metadata when no explicit output path is given
 - large payloads are processed in chunks instead of loading everything into memory at once
+- a live progress bar is shown for archive preparation, encryption, decryption, and restore
 
 ## Limits
 
@@ -210,7 +267,9 @@ Latest local validation completed on `2026-04-10`.
 Verified locally:
 
 - file encrypt -> decrypt round-trip with matching hash
+- file encrypt -> decrypt round-trip with optional compression and matching hash
 - folder encrypt -> decrypt round-trip with matching tree and file hashes
+- folder encrypt -> decrypt round-trip with optional compression and matching tree and file hashes
 - drive-root encrypt -> decrypt round-trip with matching restored tree
 - empty folder restoration
 - decryption failure with a wrong password

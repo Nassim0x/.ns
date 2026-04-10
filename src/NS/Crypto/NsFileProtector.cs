@@ -43,6 +43,17 @@ internal sealed class NsFileProtector
 
     public void EncryptFile(string inputPath, string outputPath, ReadOnlySpan<char> password, bool overwrite)
     {
+        EncryptFile(inputPath, outputPath, password, overwrite, compress: false, progress: null);
+    }
+
+    public void EncryptFile(
+        string inputPath,
+        string outputPath,
+        ReadOnlySpan<char> password,
+        bool overwrite,
+        bool compress,
+        IProgress<NsProgressUpdate>? progress)
+    {
         EnsurePasswordPolicy(password);
 
         var sourcePath = Path.GetFullPath(inputPath);
@@ -55,7 +66,7 @@ internal sealed class NsFileProtector
 
         EnsureDifferentPaths(sourcePath, destinationPath);
 
-        using var preparedPayload = PrepareEncryptionPayload(sourcePath);
+        using var preparedPayload = PrepareEncryptionPayload(sourcePath, compress, progress);
         var metadata = new NsMetadata
         {
             OriginalName = preparedPayload.OriginalName,
@@ -119,7 +130,9 @@ internal sealed class NsFileProtector
                         metadataCipher,
                         metadataTag,
                         noncePrefix,
-                        contentKey);
+                        contentKey,
+                        preparedPayload.PayloadLength,
+                        progress);
                 }
                 finally
                 {
@@ -151,6 +164,16 @@ internal sealed class NsFileProtector
 
     public string DecryptFile(string inputPath, string? outputPath, ReadOnlySpan<char> password, bool overwrite)
     {
+        return DecryptFile(inputPath, outputPath, password, overwrite, progress: null);
+    }
+
+    public string DecryptFile(
+        string inputPath,
+        string? outputPath,
+        ReadOnlySpan<char> password,
+        bool overwrite,
+        IProgress<NsProgressUpdate>? progress)
+    {
         var sourcePath = Path.GetFullPath(inputPath);
 
         if (!File.Exists(sourcePath))
@@ -164,14 +187,14 @@ internal sealed class NsFileProtector
 
         return version switch
         {
-            Version1 => DecryptFileV1(sourceStream, sourcePath, outputPath, password, overwrite),
-            Version2 => DecryptFileV2(sourceStream, sourcePath, outputPath, password, overwrite),
-            Version3 => DecryptFileV3(sourceStream, sourcePath, outputPath, password, overwrite),
+            Version1 => DecryptFileV1(sourceStream, sourcePath, outputPath, password, overwrite, progress),
+            Version2 => DecryptFileV2(sourceStream, sourcePath, outputPath, password, overwrite, progress),
+            Version3 => DecryptFileV3(sourceStream, sourcePath, outputPath, password, overwrite, progress),
             _ => throw new InvalidDataException("Unsupported .ns version.")
         };
     }
 
-    private string DecryptFileV3(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite)
+    private string DecryptFileV3(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress)
     {
         var headerPrefix = ReadV3HeaderPrefix(
             sourceStream,
@@ -239,8 +262,22 @@ internal sealed class NsFileProtector
 
                             try
                             {
-                                DecryptContent(sourceStream, tempArchivePath, true, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength);
-                                RestoreDirectoryPayload(tempArchivePath, destinationPath, overwrite);
+                                DecryptContent(sourceStream, tempArchivePath, true, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength, progress);
+                                RestoreDirectoryPayload(tempArchivePath, destinationPath, overwrite, progress);
+                            }
+                            finally
+                            {
+                                SafeDelete(tempArchivePath);
+                            }
+                        }
+                        else if (metadata.PayloadKind == NsPayloadKind.CompressedFile)
+                        {
+                            var tempArchivePath = CreateTemporaryArchivePath();
+
+                            try
+                            {
+                                DecryptContent(sourceStream, tempArchivePath, true, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength, progress);
+                                RestoreCompressedFilePayload(tempArchivePath, destinationPath, overwrite, progress);
                             }
                             finally
                             {
@@ -249,7 +286,7 @@ internal sealed class NsFileProtector
                         }
                         else
                         {
-                            DecryptContent(sourceStream, destinationPath, overwrite, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength);
+                            DecryptContent(sourceStream, destinationPath, overwrite, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength, progress);
                         }
                     }
                     finally
@@ -291,7 +328,7 @@ internal sealed class NsFileProtector
         }
     }
 
-    private string DecryptFileV2(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite)
+    private string DecryptFileV2(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress)
     {
         var headerPrefix = ReadV2HeaderPrefix(
             sourceStream,
@@ -350,7 +387,7 @@ internal sealed class NsFileProtector
                     try
                     {
                         EnsureDifferentPaths(sourcePath, destinationPath);
-                        DecryptContent(sourceStream, destinationPath, overwrite, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength);
+                        DecryptContent(sourceStream, destinationPath, overwrite, contentAssociatedData, noncePrefix, contentKey, chunkSize, metadata.PayloadLength, progress);
                     }
                     finally
                     {
@@ -391,7 +428,7 @@ internal sealed class NsFileProtector
         }
     }
 
-    private string DecryptFileV1(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite)
+    private string DecryptFileV1(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress)
     {
         var headerPrefix = ReadLegacyHeaderPrefix(sourceStream, out var iterations, out var chunkSize, out var salt, out var noncePrefix, out var metadataLength);
         var key = DeriveLegacyPasswordKey(password, salt, iterations);
@@ -413,7 +450,7 @@ internal sealed class NsFileProtector
                 var destinationPath = ResolveDecryptPath(sourcePath, outputPath, metadata);
 
                 EnsureDifferentPaths(sourcePath, destinationPath);
-                DecryptContent(sourceStream, destinationPath, overwrite, headerPrefix, noncePrefix, aes, chunkSize, metadata.PayloadLength);
+                DecryptContent(sourceStream, destinationPath, overwrite, headerPrefix, noncePrefix, aes, chunkSize, metadata.PayloadLength, progress);
                 return destinationPath;
             }
             finally
@@ -432,11 +469,20 @@ internal sealed class NsFileProtector
         }
     }
 
-    private static PreparedPayload PrepareEncryptionPayload(string sourcePath)
+    private static PreparedPayload PrepareEncryptionPayload(string sourcePath, bool compress, IProgress<NsProgressUpdate>? progress)
     {
         if (File.Exists(sourcePath))
         {
-            return new PreparedPayload(sourcePath, new FileInfo(sourcePath).Length, Path.GetFileName(sourcePath), NsPayloadKind.File);
+            var fileInfo = new FileInfo(sourcePath);
+
+            if (!compress)
+            {
+                return new PreparedPayload(sourcePath, fileInfo.Length, Path.GetFileName(sourcePath), NsPayloadKind.File);
+            }
+
+            var compressedArchivePath = CreateTemporaryArchivePath();
+            CreateSingleFileArchive(sourcePath, compressedArchivePath, CompressionLevel.Optimal, progress);
+            return new PreparedPayload(compressedArchivePath, new FileInfo(compressedArchivePath).Length, Path.GetFileName(sourcePath), NsPayloadKind.CompressedFile, ownsPayloadPath: true);
         }
 
         if (!Directory.Exists(sourcePath))
@@ -448,7 +494,8 @@ internal sealed class NsFileProtector
         var originalName = GetContainerDisplayNameForDirectory(sourcePath);
 
         var archivePath = CreateTemporaryArchivePath();
-        CreateDirectoryArchive(sourcePath, archivePath);
+        var compressionLevel = compress ? CompressionLevel.Optimal : CompressionLevel.NoCompression;
+        CreateDirectoryArchive(sourcePath, archivePath, compressionLevel, progress);
         return new PreparedPayload(archivePath, new FileInfo(archivePath).Length, originalName, NsPayloadKind.Directory, ownsPayloadPath: true);
     }
 
@@ -461,10 +508,12 @@ internal sealed class NsFileProtector
         byte[] metadataCipher,
         byte[] metadataTag,
         byte[] noncePrefix,
-        byte[] contentKey)
+        byte[] contentKey,
+        long payloadLength,
+        IProgress<NsProgressUpdate>? progress)
     {
         using var aes = new AesGcm(contentKey, TagSize);
-        EncryptContent(sourcePath, destinationPath, overwrite, headerToWrite, associatedData, metadataCipher, metadataTag, noncePrefix, aes);
+        EncryptContent(sourcePath, destinationPath, overwrite, headerToWrite, associatedData, metadataCipher, metadataTag, noncePrefix, aes, payloadLength, progress);
     }
 
     private static void DecryptContent(
@@ -475,10 +524,11 @@ internal sealed class NsFileProtector
         byte[] noncePrefix,
         byte[] contentKey,
         int chunkSize,
-        long payloadLength)
+        long payloadLength,
+        IProgress<NsProgressUpdate>? progress)
     {
         using var aes = new AesGcm(contentKey, TagSize);
-        DecryptContent(sourceStream, destinationPath, overwrite, associatedData, noncePrefix, aes, chunkSize, payloadLength);
+        DecryptContent(sourceStream, destinationPath, overwrite, associatedData, noncePrefix, aes, chunkSize, payloadLength, progress);
     }
 
     private static void EncryptContent(
@@ -490,7 +540,9 @@ internal sealed class NsFileProtector
         byte[] metadataCipher,
         byte[] metadataTag,
         byte[] noncePrefix,
-        AesGcm aes)
+        AesGcm aes,
+        long payloadLength,
+        IProgress<NsProgressUpdate>? progress)
     {
         EnsureOutputDirectory(destinationPath);
         using var input = File.OpenRead(sourcePath);
@@ -509,6 +561,8 @@ internal sealed class NsFileProtector
                 output.Write(metadataTag);
 
                 uint counter = 1;
+                long processedBytes = 0;
+                ReportProgress(progress, "Encrypting", processedBytes, payloadLength);
 
                 while (true)
                 {
@@ -529,6 +583,8 @@ internal sealed class NsFileProtector
 
                     output.Write(cipherBuffer, 0, bytesRead);
                     output.Write(tagBuffer);
+                    processedBytes += bytesRead;
+                    ReportProgress(progress, "Encrypting", processedBytes, payloadLength);
                 }
 
                 output.Flush(flushToDisk: true);
@@ -790,7 +846,8 @@ internal sealed class NsFileProtector
         byte[] noncePrefix,
         AesGcm aes,
         int chunkSize,
-        long payloadLength)
+        long payloadLength,
+        IProgress<NsProgressUpdate>? progress)
     {
         EnsureOutputDirectory(destinationPath);
         var tempPath = CreateTemporaryPath(destinationPath);
@@ -805,6 +862,8 @@ internal sealed class NsFileProtector
             {
                 long remaining = payloadLength;
                 uint counter = 1;
+                long processedBytes = 0;
+                ReportProgress(progress, "Decrypting", processedBytes, payloadLength);
 
                 while (remaining > 0)
                 {
@@ -822,6 +881,8 @@ internal sealed class NsFileProtector
 
                     output.Write(plaintextBuffer, 0, currentChunkLength);
                     remaining -= currentChunkLength;
+                    processedBytes += currentChunkLength;
+                    ReportProgress(progress, "Decrypting", processedBytes, payloadLength);
                 }
 
                 if (sourceStream.Position != sourceStream.Length)
@@ -1009,52 +1070,163 @@ internal sealed class NsFileProtector
         File.Move(tempPath, destinationPath, overwrite);
     }
 
-    private static void CreateDirectoryArchive(string sourceDirectory, string archivePath)
+    private static void CreateSingleFileArchive(string sourceFile, string archivePath, CompressionLevel compressionLevel, IProgress<NsProgressUpdate>? progress)
     {
-        var fullArchivePath = Path.GetFullPath(archivePath);
+        EnsureSafeFileSource(sourceFile);
+
+        var totalBytes = new FileInfo(sourceFile).Length;
+        long processedBytes = 0;
+
+        ReportProgress(progress, "Preparing", processedBytes, totalBytes);
+
         using var stream = File.Create(archivePath);
         using var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: false, entryNameEncoding: Encoding.UTF8);
+        var entry = archive.CreateEntry(Path.GetFileName(sourceFile), compressionLevel);
+        entry.LastWriteTime = File.GetLastWriteTimeUtc(sourceFile);
+
+        using var input = File.OpenRead(sourceFile);
+        using var output = entry.Open();
+        CopyStreamWithProgress(input, output, progress, "Preparing", totalBytes, ref processedBytes);
+        ReportProgress(progress, "Preparing", processedBytes, totalBytes);
+    }
+
+    private static void CreateDirectoryArchive(string sourceDirectory, string archivePath, CompressionLevel compressionLevel, IProgress<NsProgressUpdate>? progress)
+    {
+        var fullArchivePath = Path.GetFullPath(archivePath);
+        var directories = new List<string>();
+        var files = new List<string>();
         var stack = new Stack<string>();
         stack.Push(Path.GetFullPath(sourceDirectory));
+        long totalBytes = 0;
 
         while (stack.Count > 0)
         {
             var currentDirectory = stack.Pop();
             EnsureSafeDirectorySource(currentDirectory);
+            directories.Add(currentDirectory);
 
             foreach (var directory in Directory.GetDirectories(currentDirectory))
             {
-                EnsureSafeDirectorySource(directory);
-                var relativeDirectory = NormalizeArchiveEntryName(Path.GetRelativePath(sourceDirectory, directory));
-
-                if (!string.IsNullOrEmpty(relativeDirectory))
-                {
-                    archive.CreateEntry($"{relativeDirectory}/");
-                }
-
-                stack.Push(directory);
+                var fullDirectoryPath = Path.GetFullPath(directory);
+                EnsureSafeDirectorySource(fullDirectoryPath);
+                stack.Push(fullDirectoryPath);
             }
 
             foreach (var file in Directory.GetFiles(currentDirectory))
             {
-                if (string.Equals(Path.GetFullPath(file), fullArchivePath, StringComparison.OrdinalIgnoreCase))
+                var fullFilePath = Path.GetFullPath(file);
+
+                if (string.Equals(fullFilePath, fullArchivePath, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
-                EnsureSafeFileSource(file);
-                var relativeFile = NormalizeArchiveEntryName(Path.GetRelativePath(sourceDirectory, file));
-                var entry = archive.CreateEntry(relativeFile, CompressionLevel.NoCompression);
-                entry.LastWriteTime = File.GetLastWriteTimeUtc(file);
-
-                using var input = File.OpenRead(file);
-                using var output = entry.Open();
-                input.CopyTo(output);
+                EnsureSafeFileSource(fullFilePath);
+                files.Add(fullFilePath);
+                totalBytes += new FileInfo(fullFilePath).Length;
             }
+        }
+
+        directories.Sort(StringComparer.OrdinalIgnoreCase);
+        files.Sort(StringComparer.OrdinalIgnoreCase);
+
+        long processedBytes = 0;
+        ReportProgress(progress, "Preparing", processedBytes, totalBytes);
+
+        using var stream = File.Create(archivePath);
+        using var archive = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: false, entryNameEncoding: Encoding.UTF8);
+
+        foreach (var directory in directories)
+        {
+            if (string.Equals(
+                Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                Path.GetFullPath(sourceDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var relativeDirectory = NormalizeArchiveEntryName(Path.GetRelativePath(sourceDirectory, directory));
+
+            if (!string.IsNullOrEmpty(relativeDirectory))
+            {
+                archive.CreateEntry($"{relativeDirectory}/");
+            }
+        }
+
+        foreach (var file in files)
+        {
+            var relativeFile = NormalizeArchiveEntryName(Path.GetRelativePath(sourceDirectory, file));
+            var entry = archive.CreateEntry(relativeFile, compressionLevel);
+            entry.LastWriteTime = File.GetLastWriteTimeUtc(file);
+
+            using var input = File.OpenRead(file);
+            using var output = entry.Open();
+            CopyStreamWithProgress(input, output, progress, "Preparing", totalBytes, ref processedBytes);
+        }
+
+        ReportProgress(progress, "Preparing", processedBytes, totalBytes);
+    }
+
+    private static void RestoreCompressedFilePayload(string archivePath, string destinationPath, bool overwrite, IProgress<NsProgressUpdate>? progress)
+    {
+        var fullDestinationPath = Path.GetFullPath(destinationPath);
+        EnsureOutputDirectory(fullDestinationPath);
+
+        if (Directory.Exists(fullDestinationPath))
+        {
+            throw new IOException("Output path already exists. Use --force to overwrite it.");
+        }
+
+        using var archive = ZipFile.OpenRead(archivePath);
+        var fileEntries = archive.Entries
+            .Where(entry => !entry.FullName.EndsWith("/", StringComparison.Ordinal))
+            .Select(entry => new
+            {
+                Entry = entry,
+                NormalizedName = NormalizeArchiveEntryName(entry.FullName)
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.NormalizedName))
+            .ToArray();
+
+        if (fileEntries.Length != 1 || fileEntries[0].NormalizedName.Contains('/'))
+        {
+            throw new InvalidDataException("Corrupted compressed file payload.");
+        }
+
+        var tempPath = CreateTemporaryPath(fullDestinationPath);
+        var totalBytes = fileEntries[0].Entry.Length;
+        long processedBytes = 0;
+
+        try
+        {
+            using (var input = fileEntries[0].Entry.Open())
+            using (var output = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                ReportProgress(progress, "Restoring", processedBytes, totalBytes);
+                CopyStreamWithProgress(input, output, progress, "Restoring", totalBytes, ref processedBytes);
+                ReportProgress(progress, "Restoring", processedBytes, totalBytes);
+                output.Flush(flushToDisk: true);
+            }
+
+            FinalizeOutput(tempPath, fullDestinationPath, overwrite);
+
+            try
+            {
+                File.SetLastWriteTimeUtc(fullDestinationPath, fileEntries[0].Entry.LastWriteTime.UtcDateTime);
+            }
+            catch
+            {
+            }
+        }
+        catch
+        {
+            SafeDelete(tempPath);
+            throw;
         }
     }
 
-    private static void RestoreDirectoryPayload(string archivePath, string destinationPath, bool overwrite)
+    private static void RestoreDirectoryPayload(string archivePath, string destinationPath, bool overwrite, IProgress<NsProgressUpdate>? progress)
     {
         var fullDestinationPath = Path.GetFullPath(destinationPath);
         EnsureSafeDirectoryTarget(fullDestinationPath);
@@ -1083,7 +1255,7 @@ internal sealed class NsFileProtector
 
         try
         {
-            ExtractDirectoryArchive(archivePath, fullDestinationPath);
+            ExtractDirectoryArchive(archivePath, fullDestinationPath, progress);
         }
         catch
         {
@@ -1102,10 +1274,16 @@ internal sealed class NsFileProtector
         }
     }
 
-    private static void ExtractDirectoryArchive(string archivePath, string destinationDirectory)
+    private static void ExtractDirectoryArchive(string archivePath, string destinationDirectory, IProgress<NsProgressUpdate>? progress)
     {
         using var archive = ZipFile.OpenRead(archivePath);
         var fullDestination = EnsureTrailingSeparator(Path.GetFullPath(destinationDirectory));
+        var totalBytes = archive.Entries
+            .Where(entry => !entry.FullName.EndsWith("/", StringComparison.Ordinal))
+            .Sum(entry => entry.Length);
+        long processedBytes = 0;
+
+        ReportProgress(progress, "Restoring", processedBytes, totalBytes);
 
         foreach (var entry in archive.Entries)
         {
@@ -1134,9 +1312,12 @@ internal sealed class NsFileProtector
             var parentDirectory = Path.GetDirectoryName(targetPath) ?? destinationDirectory;
             Directory.CreateDirectory(parentDirectory);
 
-            using var input = entry.Open();
-            using var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            input.CopyTo(output);
+            using (var input = entry.Open())
+            using (var output = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None))
+            {
+                CopyStreamWithProgress(input, output, progress, "Restoring", totalBytes, ref processedBytes);
+                output.Flush(flushToDisk: true);
+            }
 
             try
             {
@@ -1146,6 +1327,46 @@ internal sealed class NsFileProtector
             {
             }
         }
+
+        ReportProgress(progress, "Restoring", processedBytes, totalBytes);
+    }
+
+    private static void CopyStreamWithProgress(
+        Stream input,
+        Stream output,
+        IProgress<NsProgressUpdate>? progress,
+        string label,
+        long totalBytes,
+        ref long processedBytes)
+    {
+        var buffer = ArrayPool<byte>.Shared.Rent(DefaultChunkSize);
+
+        try
+        {
+            while (true)
+            {
+                var bytesRead = input.Read(buffer, 0, buffer.Length);
+
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                output.Write(buffer, 0, bytesRead);
+                processedBytes += bytesRead;
+                ReportProgress(progress, label, processedBytes, totalBytes);
+            }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(buffer.AsSpan(0, buffer.Length));
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static void ReportProgress(IProgress<NsProgressUpdate>? progress, string label, long processedBytes, long totalBytes)
+    {
+        progress?.Report(NsProgressUpdate.Create(label, processedBytes, totalBytes));
     }
 
     private static string NormalizeArchiveEntryName(string relativePath)

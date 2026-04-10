@@ -13,6 +13,8 @@ internal sealed class NSConsole
         Console.OutputEncoding = Encoding.UTF8;
         Console.Title = "NS";
         TerminalTheme.Initialize();
+        var pauseOnExit = ShouldPauseOnExit(args);
+        TryAutoInstallShellIntegration(args);
 
         try
         {
@@ -22,12 +24,24 @@ internal sealed class NSConsole
         {
             Console.WriteLine();
             Console.WriteLine(TerminalTheme.Warning("[cancelled] Operation cancelled."));
+
+            if (pauseOnExit)
+            {
+                PauseBeforeExit();
+            }
+
             return 1;
         }
         catch (Exception ex)
         {
             Console.WriteLine();
             Console.WriteLine(TerminalTheme.Error($"[error] {ex.Message}"));
+
+            if (pauseOnExit)
+            {
+                PauseBeforeExit();
+            }
+
             return 1;
         }
     }
@@ -69,16 +83,25 @@ internal sealed class NSConsole
     {
         var force = args.Any(arg => string.Equals(arg, "--force", StringComparison.OrdinalIgnoreCase) ||
                                     string.Equals(arg, "-f", StringComparison.OrdinalIgnoreCase));
+        var compress = args.Any(arg => string.Equals(arg, "--compress", StringComparison.OrdinalIgnoreCase) ||
+                                       string.Equals(arg, "-z", StringComparison.OrdinalIgnoreCase));
 
         var positional = args
             .Where(arg => !string.Equals(arg, "--force", StringComparison.OrdinalIgnoreCase) &&
-                          !string.Equals(arg, "-f", StringComparison.OrdinalIgnoreCase))
+                          !string.Equals(arg, "-f", StringComparison.OrdinalIgnoreCase) &&
+                          !string.Equals(arg, "--compress", StringComparison.OrdinalIgnoreCase) &&
+                          !string.Equals(arg, "-z", StringComparison.OrdinalIgnoreCase))
             .ToArray();
 
         if (positional.Length == 0)
         {
             PrintUsage();
             return 1;
+        }
+
+        if (TryRunImplicitPathCommand(positional, force, compress))
+        {
+            return 0;
         }
 
         var command = positional[0].ToLowerInvariant();
@@ -92,7 +115,7 @@ internal sealed class NSConsole
                     return 1;
                 }
 
-                EncryptFile(positional[1], positional.ElementAtOrDefault(2), force);
+                EncryptFile(positional[1], positional.ElementAtOrDefault(2), force, compress);
                 return 0;
 
             case "decrypt":
@@ -103,6 +126,27 @@ internal sealed class NSConsole
                 }
 
                 DecryptFile(positional[1], positional.ElementAtOrDefault(2), force);
+                return 0;
+
+            case "encrypt-shell":
+                if (positional.Length != 2)
+                {
+                    PrintUsage();
+                    return 1;
+                }
+
+                EncryptInteractive(positional[1]);
+                return 0;
+
+            case "decrypt-shell":
+            case "open-shell":
+                if (positional.Length != 2)
+                {
+                    PrintUsage();
+                    return 1;
+                }
+
+                DecryptInteractive(positional[1]);
                 return 0;
 
             case "help":
@@ -133,9 +177,10 @@ internal sealed class NSConsole
         var suggestedOutput = $"{inputPath}.ns";
         var rawOutputPath = ReadOptionalPath($"Output .ns (leave empty for {suggestedOutput}): ", suggestedOutput) ?? suggestedOutput;
         var outputPath = ResolveEncryptOutputPath(inputPath, rawOutputPath);
+        var compress = ConfirmCompression();
         var force = ConfirmOverwriteIfNeeded(outputPath);
 
-        EncryptFile(inputPath, outputPath, force);
+        EncryptFile(inputPath, outputPath, force, compress);
         Pause();
     }
 
@@ -159,15 +204,15 @@ internal sealed class NSConsole
         Pause();
     }
 
-    private void EncryptFile(string inputPath, string? outputPath, bool force)
+    private void EncryptFile(string inputPath, string? outputPath, bool force, bool compress)
     {
         var cleanInputPath = NormalizePath(inputPath);
         var cleanOutputPath = ResolveEncryptOutputPath(cleanInputPath, outputPath);
 
         using var password = PasswordBundle.CreateForEncryption();
+        using var progress = new ConsoleProgressBar();
 
-        Console.WriteLine(TerminalTheme.Accent("[encrypt] Encrypting..."));
-        _protector.EncryptFile(cleanInputPath, cleanOutputPath, password.Password, force);
+        _protector.EncryptFile(cleanInputPath, cleanOutputPath, password.Password, force, compress, progress);
         Console.WriteLine(TerminalTheme.Success($"[done] Output: {cleanOutputPath}"));
     }
 
@@ -177,9 +222,9 @@ internal sealed class NSConsole
         var cleanOutputPath = string.IsNullOrWhiteSpace(outputPath) ? null : NormalizePath(outputPath);
 
         using var password = PasswordBundle.CreateForDecryption();
+        using var progress = new ConsoleProgressBar();
 
-        Console.WriteLine(TerminalTheme.Accent("[decrypt] Decrypting..."));
-        var finalPath = _protector.DecryptFile(cleanInputPath, cleanOutputPath, password.Password, force);
+        var finalPath = _protector.DecryptFile(cleanInputPath, cleanOutputPath, password.Password, force, progress);
         Console.WriteLine(TerminalTheme.Success($"[done] Restored: {finalPath}"));
     }
 
@@ -270,18 +315,19 @@ internal sealed class NSConsole
         Console.WriteLine(TerminalTheme.Muted("Simple Windows file, folder, and drive encryption."));
         Console.WriteLine();
         Console.WriteLine(TerminalTheme.Accent("Usage"));
-        Console.WriteLine("  NS encrypt <path> [output.ns] [--force]");
+        Console.WriteLine("  NS encrypt <path> [output.ns] [--compress] [--force]");
         Console.WriteLine("  NS decrypt <file.ns> [output] [--force]");
         Console.WriteLine("  NS help");
         Console.WriteLine();
         Console.WriteLine(TerminalTheme.AccentSoft("Examples"));
         Console.WriteLine(@"  NS encrypt ""C:\Docs\contract.pdf""");
+        Console.WriteLine(@"  NS encrypt ""C:\Docs\contract.pdf"" --compress");
         Console.WriteLine(@"  NS encrypt ""C:\Docs\Projects""");
         Console.WriteLine(@"  NS encrypt ""E:\\"" ""D:\Backups\drive-e.ns""");
         Console.WriteLine(@"  NS decrypt ""C:\Docs\contract.pdf.ns""");
         Console.WriteLine(@"  NS decrypt ""C:\Docs\contract.pdf.ns"" ""C:\Docs\contract.pdf"" --force");
         Console.WriteLine();
-        Console.WriteLine("You can also drop a path directly onto the home screen.");
+        Console.WriteLine("You can also drop a path directly onto the home screen or run NS.exe <path>.");
     }
 
     private static string ReadPath(string prompt)
@@ -315,6 +361,14 @@ internal sealed class NSConsole
         }
 
         Console.Write(TerminalTheme.Warning("Output file already exists. Overwrite? (y/N): "));
+        var answer = (Console.ReadLine() ?? string.Empty).Trim();
+        return string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) ||
+               string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool ConfirmCompression()
+    {
+        Console.Write(TerminalTheme.Muted("Compression before encryption? (y/N): "));
         var answer = (Console.ReadLine() ?? string.Empty).Trim();
         return string.Equals(answer, "y", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(answer, "yes", StringComparison.OrdinalIgnoreCase);
@@ -407,6 +461,14 @@ internal sealed class NSConsole
         Console.WriteLine();
         Console.Write(TerminalTheme.Muted("Press Enter to continue..."));
         Console.ReadLine();
+    }
+
+    private static void PauseBeforeExit()
+    {
+        if (!Console.IsOutputRedirected && !Console.IsInputRedirected)
+        {
+            Pause();
+        }
     }
 
     private static void ClearScreen()
@@ -518,6 +580,46 @@ internal sealed class NSConsole
     private static DashboardLine SuccessLine(string text) => new(text, TerminalTheme.Success(text));
 
     private static DashboardLine InfoLine(string text) => new(text, TerminalTheme.Strong(text));
+
+    private static bool ShouldPauseOnExit(string[] args)
+    {
+        return args.Length > 0 &&
+               args[0].EndsWith("-shell", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void TryAutoInstallShellIntegration(string[] args)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        WindowsShellIntegration.TryAutoInstall();
+    }
+
+    private bool TryRunImplicitPathCommand(string[] positional, bool force, bool compress)
+    {
+        if (positional.Length != 1)
+        {
+            return false;
+        }
+
+        var candidatePath = NormalizePath(positional[0]);
+
+        if (!File.Exists(candidatePath) && !Directory.Exists(candidatePath))
+        {
+            return false;
+        }
+
+        if (candidatePath.EndsWith(".ns", StringComparison.OrdinalIgnoreCase))
+        {
+            DecryptFile(candidatePath, outputPath: null, force);
+            return true;
+        }
+
+        EncryptFile(candidatePath, outputPath: null, force, compress);
+        return true;
+    }
 
     private readonly record struct DashboardLine(string Raw, string Rendered);
 }
