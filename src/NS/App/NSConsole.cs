@@ -128,6 +128,36 @@ internal sealed class NSConsole
                 DecryptFile(positional[1], positional.ElementAtOrDefault(2), force);
                 return 0;
 
+            case "verify":
+                if (positional.Length != 2)
+                {
+                    PrintUsage();
+                    return 1;
+                }
+
+                VerifyFile(positional[1]);
+                return 0;
+
+            case "recover":
+                if (positional.Length is < 2 or > 3)
+                {
+                    PrintUsage();
+                    return 1;
+                }
+
+                RecoverFile(positional[1], positional.ElementAtOrDefault(2), force);
+                return 0;
+
+            case "repair":
+                if (positional.Length is < 2 or > 3)
+                {
+                    PrintUsage();
+                    return 1;
+                }
+
+                RepairFile(positional[1], positional.ElementAtOrDefault(2), force);
+                return 0;
+
             case "encrypt-shell":
                 if (positional.Length != 2)
                 {
@@ -228,6 +258,43 @@ internal sealed class NSConsole
         Console.WriteLine(TerminalTheme.Success($"[done] Restored: {finalPath}"));
     }
 
+    private void VerifyFile(string inputPath)
+    {
+        var cleanInputPath = NormalizePath(inputPath);
+
+        using var password = PasswordBundle.CreateForDecryption();
+        using var progress = new ConsoleProgressBar();
+
+        var report = _protector.VerifyFile(cleanInputPath, password.Password, progress);
+        PrintRecoveryReport("verify", report, outputPath: null);
+    }
+
+    private void RecoverFile(string inputPath, string? outputPath, bool force)
+    {
+        var cleanInputPath = NormalizePath(inputPath);
+        var cleanOutputPath = string.IsNullOrWhiteSpace(outputPath) ? null : NormalizePath(outputPath);
+
+        using var password = PasswordBundle.CreateForDecryption();
+        using var progress = new ConsoleProgressBar();
+
+        var finalPath = _protector.RecoverFile(cleanInputPath, cleanOutputPath, password.Password, force, progress, out var report);
+        Console.WriteLine(TerminalTheme.Success($"[done] Recovered: {finalPath}"));
+        PrintRecoveryReport("recover", report, finalPath);
+    }
+
+    private void RepairFile(string inputPath, string? outputPath, bool force)
+    {
+        var cleanInputPath = NormalizePath(inputPath);
+        var cleanOutputPath = string.IsNullOrWhiteSpace(outputPath) ? null : NormalizePath(outputPath);
+
+        using var password = PasswordBundle.CreateForDecryption();
+        using var progress = new ConsoleProgressBar();
+
+        var finalPath = _protector.RepairFile(cleanInputPath, cleanOutputPath, password.Password, force, progress, out var report);
+        Console.WriteLine(TerminalTheme.Success($"[done] Repaired container: {finalPath}"));
+        PrintRecoveryReport("repair", report, finalPath);
+    }
+
     private bool TryHandleQuickFileInput(string input)
     {
         var candidates = ParseInputPaths(input)
@@ -317,6 +384,9 @@ internal sealed class NSConsole
         Console.WriteLine(TerminalTheme.Accent("Usage"));
         Console.WriteLine("  NS encrypt <path> [output.ns] [--compress] [--force]");
         Console.WriteLine("  NS decrypt <file.ns> [output] [--force]");
+        Console.WriteLine("  NS verify <file.ns>");
+        Console.WriteLine("  NS recover <file.ns> [output] [--force]");
+        Console.WriteLine("  NS repair <file.ns> [output.ns] [--force]");
         Console.WriteLine("  NS help");
         Console.WriteLine();
         Console.WriteLine(TerminalTheme.AccentSoft("Examples"));
@@ -326,8 +396,12 @@ internal sealed class NSConsole
         Console.WriteLine(@"  NS encrypt ""E:\\"" ""D:\Backups\drive-e.ns""");
         Console.WriteLine(@"  NS decrypt ""C:\Docs\contract.pdf.ns""");
         Console.WriteLine(@"  NS decrypt ""C:\Docs\contract.pdf.ns"" ""C:\Docs\contract.pdf"" --force");
+        Console.WriteLine(@"  NS verify ""C:\Vault\archive.ns""");
+        Console.WriteLine(@"  NS recover ""C:\Vault\archive.ns""");
+        Console.WriteLine(@"  NS repair ""C:\Vault\archive.ns""");
         Console.WriteLine();
         Console.WriteLine("You can also drop a path directly onto the home screen or run NS.exe <path>.");
+        Console.WriteLine("Verify, recover, and repair are available for the current stable .ns format.");
     }
 
     private static string ReadPath(string prompt)
@@ -454,6 +528,54 @@ internal sealed class NSConsole
             .Select(NormalizePath)
             .Where(path => !string.IsNullOrWhiteSpace(path))
             .ToArray();
+    }
+
+    private static void PrintRecoveryReport(string operation, NsRecoveryReport report, string? outputPath)
+    {
+        Console.WriteLine();
+        Console.WriteLine(TerminalTheme.Strong($"[{operation}] format v{report.Version}"));
+        Console.WriteLine(TerminalTheme.Muted($"name     : {report.OriginalName}"));
+        Console.WriteLine(TerminalTheme.Muted($"type     : {report.PayloadKind}"));
+        Console.WriteLine(TerminalTheme.Muted($"size     : {FormatBytes(report.PayloadLength)}"));
+        Console.WriteLine(TerminalTheme.Muted($"chunks   : {report.TotalDataChunks}"));
+        Console.WriteLine(TerminalTheme.Muted($"status   : {report.Status}"));
+
+        if (report.RepairedDataChunks > 0)
+        {
+            Console.WriteLine(TerminalTheme.Success($"repaired : {report.RepairedDataChunks} chunk(s) rebuilt automatically"));
+        }
+
+        if (report.DamagedDataChunks > 0)
+        {
+            Console.WriteLine(report.HasDataLoss
+                ? TerminalTheme.Warning($"damage   : {report.DamagedDataChunks} chunk(s) could not be restored exactly")
+                : TerminalTheme.Warning($"damage   : {report.DamagedDataChunks} damaged chunk(s) detected"));
+        }
+
+        if (report.DamagedRecoveryBlocks > 0)
+        {
+            Console.WriteLine(TerminalTheme.Warning($"recovery : {report.DamagedRecoveryBlocks} recovery block(s) damaged"));
+        }
+
+        if (!string.IsNullOrWhiteSpace(outputPath))
+        {
+            Console.WriteLine(TerminalTheme.Muted($"output   : {outputPath}"));
+        }
+    }
+
+    private static string FormatBytes(long bytes)
+    {
+        string[] units = ["B", "KB", "MB", "GB", "TB"];
+        double value = Math.Max(0, bytes);
+        var unitIndex = 0;
+
+        while (value >= 1024 && unitIndex < units.Length - 1)
+        {
+            value /= 1024;
+            unitIndex++;
+        }
+
+        return unitIndex == 0 ? $"{value:0} {units[unitIndex]}" : $"{value:0.0} {units[unitIndex]}";
     }
 
     private static void Pause()

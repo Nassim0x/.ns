@@ -11,6 +11,7 @@ NS turns a file, a full folder, or the contents of a drive into a single `.ns` c
 - supports optional compression before encryption with `--compress`
 - uses `AES-256-GCM` authenticated encryption
 - uses `Argon2id` for new `.ns` containers
+- new stable containers include built-in recovery blocks for single-chunk self-repair
 - keeps backward decrypt compatibility with older `.ns` containers
 - shows a live progress bar during preparation, encryption, decryption, and restore
 - ships as a portable single-file Windows executable: `dist/NS.exe`
@@ -72,6 +73,9 @@ Direct command examples:
 .\dist\NS.exe encrypt "C:\Docs\contract.pdf" "C:\Vault\contract"
 .\dist\NS.exe decrypt "C:\Docs\contract.pdf.ns"
 .\dist\NS.exe decrypt "C:\Photos\Trip-2026.ns" "C:\Restored\Trip-2026" --force
+.\dist\NS.exe verify "C:\Vault\archive.ns"
+.\dist\NS.exe recover "C:\Vault\archive.ns"
+.\dist\NS.exe repair "C:\Vault\archive.ns"
 ```
 
 If the output path passed to `encrypt` does not end with `.ns`, NS appends it automatically.
@@ -81,6 +85,9 @@ If the output path passed to `encrypt` does not end with `.ns`, NS appends it au
 ```text
 NS encrypt <path> [output.ns] [--compress] [--force]
 NS decrypt <file.ns> [output] [--force]
+NS verify <file.ns>
+NS recover <file.ns> [output] [--force]
+NS repair <file.ns> [output.ns] [--force]
 NS help
 ```
 
@@ -90,6 +97,9 @@ Behavior:
 - `decrypt` restores either a file or a folder, depending on what was originally stored
 - `--compress` applies ZIP compression before encryption
 - `--force` allows overwriting an existing output path
+- `verify` inspects the health of a current-format `.ns` container
+- `recover` exports what can still be recovered from a damaged current-format `.ns`
+- `repair` rebuilds a fresh current-format `.ns` when damage is self-repairable
 - running `NS.exe` without arguments starts the interactive mode
 
 ## Installation
@@ -161,6 +171,7 @@ NS uses a layered container format for new `.ns` files.
 | Key separation | distinct derived keys for metadata and content |
 | Metadata protection | encrypted, authenticated, and padded |
 | Chunk protection | authenticated block encryption with unique nonces |
+| Stability layer | recovery parity blocks per chunk group in the current stable format |
 | Folder and drive handling | packed into an internal archive before encryption |
 
 ### What This Means In Practice
@@ -172,6 +183,7 @@ For newly created `.ns` files:
 - tampering breaks authentication
 - identical inputs do not produce identical outputs
 - metadata leakage is reduced compared to a naive file wrapper
+- a single damaged content chunk inside a recovery group can be rebuilt automatically
 
 ### What NS Protects Well
 
@@ -251,6 +263,21 @@ Important:
 - large payloads are processed in chunks instead of loading everything into memory at once
 - a live progress bar is shown for archive preparation, encryption, decryption, and restore
 
+## Stability and Recovery
+
+Current stable `.ns` containers add a built-in recovery layer on top of chunked authenticated encryption.
+
+- `verify` tells you whether a container is healthy, self-repairable, or only partially recoverable
+- `decrypt` automatically rebuilds a single damaged chunk when the matching recovery block is intact
+- `repair` creates a fresh healthy `.ns` container when the damaged container can still be rebuilt exactly
+- `recover` exports the best possible result even when exact repair is no longer possible
+
+Important:
+
+- exact self-repair is designed for the current stable `.ns` format
+- older v1/v2/v3 containers remain decryptable, but they do not have the same built-in repair layer
+- when a container is too damaged for exact repair, `recover` may zero-fill unrecoverable chunks instead of pretending the file is intact
+
 ## Limits
 
 NS is intentionally focused.
@@ -260,9 +287,90 @@ NS is intentionally focused.
 - it has not been through a formal third-party security audit
 - it is currently built around Windows usage and a Windows binary distribution
 
+## Measured Local Security Audit
+
+Latest measured audit completed on `2026-04-13` against newly created current-format `.ns` containers, with repeated local runs to smooth normal machine-to-machine and run-to-run variance.
+
+Audit environment:
+
+- CPU: `AMD Ryzen 5 8400F`
+- Threads available: `12`
+- RAM: `31.6 GiB`
+- OS: `Windows 11 64-bit`
+- Binary tested: `dist/NS.exe`
+- Audit script: `scripts/SecurityAudit.ps1`
+
+Reproduce locally:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\SecurityAudit.ps1
+```
+
+What was measured:
+
+- round-trip integrity with hash comparison
+- encryption and decryption throughput on random binary data
+- wrong-password rejection timing
+- container tamper rejection at multiple offsets
+- output non-determinism across two encryptions of the same input
+- basic metadata leak check for the original filename
+- compression impact on highly compressible text data
+
+### Results
+
+| Check | Measured result |
+| --- | --- |
+| Random payload size | `32 MiB` |
+| Encrypt time | median `319.47 ms` across 3 runs |
+| Decrypt time | median `314.73 ms` across 3 runs |
+| Encrypt throughput | median `100.19 MiB/s`, observed range `100.17` to `101.98 MiB/s` |
+| Decrypt throughput | median `102.37 MiB/s`, observed range `101.67` to `107.53 MiB/s` |
+| Container size overhead on 32 MiB random data | `8,601 bytes` (`0.0256%`) |
+| Round-trip file hash | `match` |
+| Same input encrypted twice | `different container hashes` |
+| Original filename visible as plain UTF-8 in container | `not detected` |
+| Wrong-password median reject time | `276.31 ms` |
+| Wrong-password range across repeated audit runs | `261.77 ms` to `276.31 ms` |
+| Approximate wrong-password rejects on this machine | about `3.62` to `3.82 per second` |
+| Tamper tests rejected | `6 / 6` |
+
+Tamper cases checked:
+
+- modified magic byte: rejected
+- modified wrapped key area: rejected
+- modified encrypted metadata area: rejected
+- modified ciphertext in the middle of the payload: rejected
+- modified last byte of the container: rejected
+- appended trailing byte after the container: rejected
+
+Compression test on a highly compressible text file:
+
+- source size: `8,388,611 bytes`
+- encrypted container size with `--compress`: `52,854 bytes`
+- measured ratio: `0.0063` (`0.63%` of the original size)
+
+### Interpretation
+
+These measured results support the following claims for current-format containers created by the current build:
+
+- NS correctly detects wrong passwords and container tampering in the tested cases
+- NS does not produce identical output twice for the same file and password
+- NS does not expose the original filename as plain text in the tested containers
+- NS adds very little fixed overhead to already incompressible data
+- NS can shrink very compressible text payloads substantially when `--compress` is enabled
+
+### Important Caveats
+
+- these are local measurements from one machine, not universal guarantees
+- the wrong-password timing is not a formal cracking cost model and should not be treated as one
+- a stronger CPU, FPGA, or GPU-assisted attack setup can perform differently
+- the audit above covers current-format containers created now, not historical v1/v2 containers kept only for backward decryption compatibility
+- no password-based system becomes "impossible to crack" if the password itself is weak, reused, leaked, or guessable
+- this is still not a substitute for a formal third-party security review
+
 ## Validation
 
-Latest local validation completed on `2026-04-10`.
+Latest local validation completed on `2026-04-13`.
 
 Verified locally:
 
@@ -274,6 +382,7 @@ Verified locally:
 - empty folder restoration
 - decryption failure with a wrong password
 - decryption failure after container tampering
+- measured audit run with `scripts/SecurityAudit.ps1`
 - decrypt compatibility for older `.ns` containers
 - published single-file binary execution through `dist/NS.exe`
 

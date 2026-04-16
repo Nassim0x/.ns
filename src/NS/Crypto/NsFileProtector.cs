@@ -8,13 +8,14 @@ using Konscious.Security.Cryptography;
 
 namespace NS.Crypto;
 
-internal sealed class NsFileProtector
+internal sealed partial class NsFileProtector
 {
     private static ReadOnlySpan<byte> Magic => "NSF1"u8;
 
     private const byte Version1 = 1;
     private const byte Version2 = 2;
     private const byte Version3 = 3;
+    private const byte Version4 = 4;
 
     private const int LegacySaltSize = 16;
     private const int SaltSizeV2 = 32;
@@ -29,9 +30,11 @@ internal sealed class NsFileProtector
     private const int LegacyHeaderPrefixSize = 4 + 1 + 4 + 4 + LegacySaltSize + NoncePrefixSize + 4;
     private const int V2HeaderPrefixSize = 4 + 1 + 4 + 4 + SaltSizeV2 + NoncePrefixSize + NonceSize + 4 + NonceSize;
     private const int V3HeaderPrefixSize = 4 + 1 + 4 + 4 + 4 + 4 + SaltSizeV3 + NoncePrefixSize + NonceSize + 4 + NonceSize;
+    private const int V4HeaderPrefixSize = 4 + 1 + 4 + 4 + 4 + 4 + 4 + SaltSizeV3 + NoncePrefixSize + NonceSize + 4 + NonceSize;
     private const int WrappedSectionSize = FileKeySize + TagSize;
     private const int V2FullHeaderSize = V2HeaderPrefixSize + WrappedSectionSize;
     private const int V3FullHeaderSize = V3HeaderPrefixSize + WrappedSectionSize;
+    private const int V4FullHeaderSize = V4HeaderPrefixSize + WrappedSectionSize;
 
     private const int LegacyIterations = 600_000;
     private const int MaxMetadataSize = 8 * 1024;
@@ -40,6 +43,7 @@ internal sealed class NsFileProtector
     private const int MinimumEncryptionPasswordLength = 12;
     private const int DefaultArgon2Iterations = 3;
     private const int DefaultArgon2MemorySizeKiB = 64 * 1024;
+    private const int DefaultRecoveryGroupSize = 16;
 
     public void EncryptFile(string inputPath, string outputPath, ReadOnlySpan<char> password, bool overwrite)
     {
@@ -67,6 +71,80 @@ internal sealed class NsFileProtector
         EnsureDifferentPaths(sourcePath, destinationPath);
 
         using var preparedPayload = PrepareEncryptionPayload(sourcePath, compress, progress);
+        EncryptPreparedPayload(preparedPayload, destinationPath, password, overwrite, progress);
+    }
+
+    public NsRecoveryReport VerifyFile(string inputPath, ReadOnlySpan<char> password, IProgress<NsProgressUpdate>? progress)
+    {
+        var sourcePath = Path.GetFullPath(inputPath);
+
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("The .ns file was not found.", sourcePath);
+        }
+
+        using var sourceStream = File.OpenRead(sourcePath);
+        var version = ReadVersion(sourceStream);
+        sourceStream.Position = 0;
+
+        return version switch
+        {
+            Version1 => throw new InvalidOperationException("Verification is supported for the current stable .ns format only. Decrypt and re-encrypt old containers to upgrade them."),
+            Version2 => throw new InvalidOperationException("Verification is supported for the current stable .ns format only. Decrypt and re-encrypt old containers to upgrade them."),
+            Version3 => throw new InvalidOperationException("Verification is supported for the current stable .ns format only. Decrypt and re-encrypt old containers to upgrade them."),
+            Version4 => VerifyV4File(sourceStream, password, progress),
+            _ => throw new InvalidDataException("Unsupported .ns version.")
+        };
+    }
+
+    public string RecoverFile(string inputPath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress, out NsRecoveryReport report)
+    {
+        var sourcePath = Path.GetFullPath(inputPath);
+
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("The .ns file was not found.", sourcePath);
+        }
+
+        using var sourceStream = File.OpenRead(sourcePath);
+        var version = ReadVersion(sourceStream);
+        sourceStream.Position = 0;
+
+        return version switch
+        {
+            Version1 => throw new InvalidOperationException("Recovery is supported for the current stable .ns format only. Decrypt and re-encrypt old containers to upgrade them."),
+            Version2 => throw new InvalidOperationException("Recovery is supported for the current stable .ns format only. Decrypt and re-encrypt old containers to upgrade them."),
+            Version3 => throw new InvalidOperationException("Recovery is supported for the current stable .ns format only. Decrypt and re-encrypt old containers to upgrade them."),
+            Version4 => RecoverV4File(sourceStream, sourcePath, outputPath, password, overwrite, progress, out report),
+            _ => throw new InvalidDataException("Unsupported .ns version.")
+        };
+    }
+
+    public string RepairFile(string inputPath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress, out NsRecoveryReport report)
+    {
+        var sourcePath = Path.GetFullPath(inputPath);
+
+        if (!File.Exists(sourcePath))
+        {
+            throw new FileNotFoundException("The .ns file was not found.", sourcePath);
+        }
+
+        using var sourceStream = File.OpenRead(sourcePath);
+        var version = ReadVersion(sourceStream);
+        sourceStream.Position = 0;
+
+        return version switch
+        {
+            Version1 => throw new InvalidOperationException("Repairing legacy .ns containers is not supported. Use recover, then re-encrypt."),
+            Version2 => throw new InvalidOperationException("Repairing v2 .ns containers is not supported. Use recover, then re-encrypt."),
+            Version3 => throw new InvalidOperationException("Repairing v3 .ns containers is not supported. Use recover, then re-encrypt."),
+            Version4 => RepairV4File(sourceStream, sourcePath, outputPath, password, overwrite, progress, out report),
+            _ => throw new InvalidDataException("Unsupported .ns version.")
+        };
+    }
+
+    private void EncryptPreparedPayload(PreparedPayload preparedPayload, string destinationPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress)
+    {
         var metadata = new NsMetadata
         {
             OriginalName = preparedPayload.OriginalName,
@@ -86,11 +164,12 @@ internal sealed class NsFileProtector
         var metadataTag = new byte[TagSize];
 
         var parallelism = Math.Clamp(Environment.ProcessorCount, 1, 4);
-        var headerPrefix = BuildV3HeaderPrefix(
+        var headerPrefix = BuildV4HeaderPrefix(
             DefaultArgon2Iterations,
             DefaultArgon2MemorySizeKiB,
             parallelism,
             DefaultChunkSize,
+            DefaultRecoveryGroupSize,
             salt,
             noncePrefix,
             metadataNonce,
@@ -106,9 +185,10 @@ internal sealed class NsFileProtector
                 keyWrapAes.Encrypt(keyWrapNonce, fileKey, wrappedFileKey, wrappedFileKeyTag, headerPrefix);
             }
 
-            var fullHeader = BuildFullHeader(headerPrefix, wrappedFileKey, wrappedFileKeyTag, V3FullHeaderSize);
+            var fullHeader = BuildFullHeader(headerPrefix, wrappedFileKey, wrappedFileKeyTag, V4FullHeaderSize);
             var metadataKey = DeriveSubKey(fileKey, salt, "ns:metadata");
             var contentKey = DeriveSubKey(fileKey, salt, "ns:content");
+            var repairKey = DeriveSubKey(fileKey, salt, "ns:repair");
 
             try
             {
@@ -131,6 +211,9 @@ internal sealed class NsFileProtector
                         metadataTag,
                         noncePrefix,
                         contentKey,
+                        repairKey,
+                        DefaultChunkSize,
+                        DefaultRecoveryGroupSize,
                         preparedPayload.PayloadLength,
                         progress);
                 }
@@ -144,6 +227,7 @@ internal sealed class NsFileProtector
                 CryptographicOperations.ZeroMemory(fullHeader);
                 CryptographicOperations.ZeroMemory(metadataKey);
                 CryptographicOperations.ZeroMemory(contentKey);
+                CryptographicOperations.ZeroMemory(repairKey);
             }
         }
         finally
@@ -190,8 +274,23 @@ internal sealed class NsFileProtector
             Version1 => DecryptFileV1(sourceStream, sourcePath, outputPath, password, overwrite, progress),
             Version2 => DecryptFileV2(sourceStream, sourcePath, outputPath, password, overwrite, progress),
             Version3 => DecryptFileV3(sourceStream, sourcePath, outputPath, password, overwrite, progress),
+            Version4 => DecryptFileV4(sourceStream, sourcePath, outputPath, password, overwrite, progress),
             _ => throw new InvalidDataException("Unsupported .ns version.")
         };
+    }
+
+    private string DecryptFileV4(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress)
+    {
+        return DecryptOrRecoverV4File(
+            sourceStream,
+            sourcePath,
+            outputPath,
+            password,
+            overwrite,
+            progress,
+            allowDataLoss: false,
+            recoverArchivesAsPayload: false,
+            out _);
     }
 
     private string DecryptFileV3(Stream sourceStream, string sourcePath, string? outputPath, ReadOnlySpan<char> password, bool overwrite, IProgress<NsProgressUpdate>? progress)
