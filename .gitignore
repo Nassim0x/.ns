@@ -6,3 +6,6 @@ obj/
 compat-v1/
 validation-v*/
 publish-check/
+dist/NS-Installer.exe
+dist/SHA256SUMS.txt
+dist/*.pdb

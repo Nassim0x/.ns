@@ -4,6 +4,13 @@ Secure local file, folder, and drive-content encryption for Windows, designed to
 
 NS turns a file, a full folder, or the contents of a drive into a single `.ns` container, then restores it later with the correct password. It is built for people who want strong modern encryption in a normal Windows terminal without dealing with a heavy vault app or a complicated workflow.
 
+Latest release:
+
+- [v1.3.0](https://github.com/Nassim0x/.ns/releases/tag/v1.3.0)
+- [NS.exe](https://github.com/Nassim0x/.ns/releases/download/v1.3.0/NS.exe)
+- [NS-Installer.exe](https://github.com/Nassim0x/.ns/releases/download/v1.3.0/NS-Installer.exe)
+- [SHA256SUMS.txt](https://github.com/Nassim0x/.ns/releases/download/v1.3.0/SHA256SUMS.txt)
+
 ## Overview
 
 - encrypts files, folders, and drive contents into a single `.ns` container
@@ -110,6 +117,7 @@ The easiest way to use NS is the published executable:
 
 - `dist/NS.exe`
 - `dist/NS-Installer.exe`
+- [Latest GitHub release downloads](https://github.com/Nassim0x/.ns/releases/tag/v1.3.0)
 
 No `dotnet run` step is required.
 
